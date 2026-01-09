@@ -278,7 +278,14 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let delay_us =
             unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
         let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
-        let timeout_us = delay_us.clamp(1, DNS_POLL_SLICE_US);
+        let streams_len_for_sleep = unsafe { (*state_ptr).streams.len() };
+        let has_work = pending_polls > 0 || streams_len_for_sleep > 0;
+        // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
+        let timeout_us = if has_work {
+            delay_us.clamp(1, DNS_POLL_SLICE_US)
+        } else {
+            delay_us.max(1)
+        };
         let timeout = Duration::from_micros(timeout_us);
 
         tokio::select! {

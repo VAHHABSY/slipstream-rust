@@ -29,6 +29,12 @@ PROXY_DELAY_MS="${PROXY_DELAY_MS:-}"
 PROXY_JITTER_MS="${PROXY_JITTER_MS:-}"
 PROXY_DIST="${PROXY_DIST:-normal}"
 PROXY_PORT="${PROXY_PORT:-}"
+CLIENT_ARGS="${CLIENT_ARGS:-}"
+
+client_arg_list=()
+if [[ -n "${CLIENT_ARGS}" ]]; then
+  read -r -a client_arg_list <<< "${CLIENT_ARGS}"
+fi
 
 if [[ ! -d "${SLIPSTREAM_DIR}" ]]; then
   echo "Slipstream repo not found at ${SLIPSTREAM_DIR}. Set SLIPSTREAM_DIR to override." >&2
@@ -180,7 +186,7 @@ run_case() {
   local target_preface_args=()
   local linger_args=()
   local target_linger_args=()
-  local client_extra_args=()
+  local client_extra_args=("${client_arg_list[@]}")
   local resolver_port="${DNS_LISTEN_PORT}"
   mkdir -p "${case_dir}"
 
@@ -189,7 +195,7 @@ run_case() {
     target_preface_args=(--preface-bytes 1)
   fi
   if [[ "${SLIPSTREAM_GSO}" != "0" ]]; then
-    client_extra_args=(-g)
+    client_extra_args+=(-g)
   fi
   if [[ "${client_mode}" == "send" && "${TCP_LINGER_SECS}" != "0" ]]; then
     linger_args=(--linger-secs "${TCP_LINGER_SECS}")
