@@ -48,6 +48,10 @@ separate tasks, with bounded channels used to limit memory growth under load.
 - The Rust client clamps active DNS polling sleeps to `DNS_POLL_SLICE_US` (50 ms),
   even if picoquic suggests a longer wake delay. This may differ from the C
   client's timing and can affect poll cadence under load.
+- When the server has no QUIC payload ready for a poll, the Rust server answers
+  with an empty NOERROR response to clear the poll and avoid backlog, instead
+  of dropping the query; this diverges from the C server, which currently emits
+  NXDOMAIN on an empty payload.
 
 ## Safety and shutdown
 
