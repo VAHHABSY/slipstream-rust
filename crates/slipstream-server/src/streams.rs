@@ -722,16 +722,16 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 }
                 if let Some(pending) = stream.send_pending.as_ref() {
                     pending.store(true, Ordering::SeqCst);
-                    let cnx = cnx_id as *mut picoquic_cnx_t;
-                    let ret = unsafe {
-                        picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut())
-                    };
-                    if ret != 0 && state.debug_streams {
-                        debug!(
-                            "stream {:?}: mark_active_stream fin failed ret={}",
-                            stream_id, ret
-                        );
-                    }
+                }
+                let cnx = cnx_id as *mut picoquic_cnx_t;
+                let ret = unsafe {
+                    picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut())
+                };
+                if ret != 0 && state.debug_streams {
+                    debug!(
+                        "stream {:?}: mark_active_stream fin failed ret={}",
+                        stream_id, ret
+                    );
                 }
             }
         }
