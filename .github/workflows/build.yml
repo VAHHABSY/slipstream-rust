@@ -1,0 +1,196 @@
+# Build libslipstream.so for Android ABIs (tailored to VAHHABSY/slipstream-rust layout)
+# - Builds cdylib from crates/slipstream-client
+# - Verifies produced file is a shared object (not an executable)
+# - Uploads per-ABI artifacts
+# - Packaging job downloads artifacts, verifies, strips and zips them into a jniLibs/ layout
+name: Build libslipstream for Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'crates/slipstream-client/**'
+      - 'Cargo.lock'
+
+env:
+  TZ: UTC
+
+jobs:
+  build:
+    name: Build libslipstream (matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      matrix:
+        target:
+          - rust_triple: aarch64-linux-android
+            ndk_triple: aarch64-linux-android
+            abi: arm64-v8a
+            api: 33
+          - rust_triple: armv7-linux-androideabi
+            ndk_triple: armv7a-linux-androideabi
+            abi: armeabi-v7a
+            api: 33
+          - rust_triple: x86_64-linux-android
+            ndk_triple: x86_64-linux-android
+            abi: x86_64
+            api: 33
+          - rust_triple: i686-linux-android
+            ndk_triple: i686-linux-androideabi
+            abi: x86
+            api: 33
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26c
+          add-to-path: true
+
+      - name: Install Rust toolchain and target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target.rust_triple }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build python3 perl pkg-config libssl-dev
+
+      - name: Cache Cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/slipstream-client/target
+          key: ${{ runner.os }}-cargo-${{ matrix.target.abi }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup toolchain env for ${{ matrix.target.abi }}
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          CC_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang"
+          CXX_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang++"
+          AR_PATH="${NDK_TOOLCHAIN}/bin/llvm-ar"
+          RANLIB_PATH="${NDK_TOOLCHAIN}/bin/llvm-ranlib"
+          TARGET_UPPER=$(echo "${{ matrix.target.rust_triple }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${CC_PATH}" >> $GITHUB_ENV
+          echo "CC=${CC_PATH}" >> $GITHUB_ENV
+          echo "CXX=${CXX_PATH}" >> $GITHUB_ENV
+          echo "AR=${AR_PATH}" >> $GITHUB_ENV
+          echo "RANLIB=${RANLIB_PATH}" >> $GITHUB_ENV
+          echo "ANDROID_PLATFORM=android-${{ matrix.target.api }}" >> $GITHUB_ENV
+          echo "ANDROID_ABI=${{ matrix.target.abi }}" >> $GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+          echo "OPENSSL_ROOT_DIR=/usr" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          echo "OPENSSL_CRYPTO_LIBRARY=/usr/lib/x86_64-linux-gnu/libcrypto.so" >> $GITHUB_ENV
+          echo "OPENSSL_SSL_LIBRARY=/usr/lib/x86_64-linux-gnu/libssl.so" >> $GITHUB_ENV
+
+      - name: Build libslipstream (cdylib) for ${{ matrix.target.abi }}
+        working-directory: crates/slipstream-client
+        run: |
+          # Build the library (cdylib) target for the Android triple
+          cargo build \
+            --release \
+            --target ${{ matrix.target.rust_triple }} \
+            --lib \
+            --features openssl-vendored,picoquic-minimal-build
+
+      - name: Verify produced library
+        working-directory: crates/slipstream-client
+        run: |
+          LIB="target/${{ matrix.target.rust_triple }}/release/libslipstream.so"
+          echo "Expecting $LIB"
+          if [ ! -f "$LIB" ]; then
+            echo "ERROR: expected library not found: $LIB"
+            ls -la "target/${{ matrix.target.rust_triple }}/release" || true
+            exit 1
+          fi
+          echo "Library exists:"
+          ls -lh "$LIB"
+          file "$LIB"
+          # Fail if it's not a shared object
+          file "$LIB" | grep -E "shared object|shared library" || (file "$LIB" && exit 1)
+
+      - name: Upload lib artifact
+        working-directory: crates/slipstream-client
+        uses: actions/upload-artifact@v4
+        with:
+          name: slipstream-${{ matrix.target.abi }}
+          path: target/${{ matrix.target.rust_triple }}/release/libslipstream.so
+          retention-days: 7
+
+  package:
+    name: Package libs and create zip
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: libs
+
+      - name: Setup Android NDK (for strip)
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26c
+          add-to-path: true
+
+      - name: Verify downloaded libs
+        run: |
+          echo "Listing libs:"
+          find libs -type f -maxdepth 3 -print -exec file {} \;
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            FILE="libs/slipstream-${abi}/libslipstream.so"
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: missing $FILE"
+              exit 1
+            fi
+            echo "=== $abi ==="
+            ls -lh "$FILE"
+            file "$FILE"
+          done
+
+      - name: Strip libraries
+        run: |
+          STRIP="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            SRC="libs/slipstream-${abi}/libslipstream.so"
+            SIZE_BEFORE=$(stat -c%s "$SRC")
+            "$STRIP" "$SRC" || echo "strip failed for $SRC"
+            SIZE_AFTER=$(stat -c%s "$SRC")
+            echo "✓ Stripped ${abi}: $(numfmt --to=iec $SIZE_BEFORE) → $(numfmt --to=iec $SIZE_AFTER)"
+          done
+
+      - name: Create zip package (jniLibs layout)
+        run: |
+          mkdir -p out/jniLibs
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            mkdir -p out/jniLibs/${abi}
+            cp libs/slipstream-${abi}/libslipstream.so out/jniLibs/${abi}/libslipstream.so
+          done
+          cd out
+          zip -r ../slipstream-android-jniLibs.zip jniLibs
+          cd ..
+          sha256sum slipstream-android-jniLibs.zip > slipstream-android-jniLibs.zip.sha256
+          ls -lh slipstream-android-jniLibs.zip slipstream-android-jniLibs.zip.sha256
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: slipstream-android-jniLibs
+          path: |
+            slipstream-android-jniLibs.zip
+            slipstream-android-jniLibs.zip.sha256
+          retention-days: 30

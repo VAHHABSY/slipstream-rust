@@ -27,3 +27,8 @@ picoquic-minimal-build = ["slipstream-ffi/picoquic-minimal-build"]
 
 [dev-dependencies]
 slipstream-core = { path = "../slipstream-core", features = ["invariant-panic", "test-support"] }
+
+
+[lib]
+name = "slipstream"
+crate-type = ["cdylib"]
