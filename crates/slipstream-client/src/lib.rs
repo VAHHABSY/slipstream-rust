@@ -202,7 +202,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     let cert = if args.cert.is_some() {
         args.cert.clone()
     } else {
-        sip003::last_option_value(&sip303_env.plugin_options, "cert")
+        sip003::last_option_value(&sip003_env.plugin_options, "cert")
     };
     if cert.is_none() {
         tracing::warn!(
