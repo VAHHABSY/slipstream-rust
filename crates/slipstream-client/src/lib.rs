@@ -174,7 +174,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                     return 2;
                 }
             };
-            if let Some(endpoint) = &sip303_check_opt(&sip003_remote) {
+            if let Some(endpoint) = &sip003_check_opt(&sip003_remote) {
                 let mode = if resolver_options.authoritative_remote {
                     ResolverMode::Authoritative
                 } else {
@@ -280,7 +280,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
 }
 
 // Helper: unwrap Option<&T> to Option<&T> (preserve previous logic naming)
-fn sip303_check_opt<T>(opt: &Option<T>) -> Option<&T> {
+fn sip003_check_opt<T>(opt: &Option<T>) -> Option<&T> {
     opt.as_ref()
 }
 
@@ -293,9 +293,10 @@ fn init_logging() {
     {
         use android_logger::Config;
         use log::LevelFilter;
+        // android_logger uses `with_max_level` to set the maximum level observed
         android_logger::init_once(
             Config::default()
-                .with_min_level(LevelFilter::Info)
+                .with_max_level(LevelFilter::Info)
                 .with_tag("slipstream"),
         );
     }
@@ -399,7 +400,7 @@ struct ResolverOptions {
 }
 
 fn parse_resolvers_from_options(
-    options: &[sip003::Sip303Option],
+    options: &[sip003::Sip003Option],
 ) -> Result<ResolverOptions, String> {
     let mut ordered = Vec::new();
     let mut authoritative_remote = false;
