@@ -18,6 +18,8 @@ slipstream-ffi = { path = "../slipstream-ffi" }
 tokio = { version = "1.37", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+android_logger = "0.13"
+log = "0.4"
 
 [features]
 default = []

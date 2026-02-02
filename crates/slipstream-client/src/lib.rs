@@ -68,7 +68,12 @@ pub struct Args {
 /// Run the main client logic and return an exit code.
 /// Accepts concrete Vec<String> to satisfy clap trait bounds.
 pub fn run_with_args(args: Vec<String>) -> i32 {
+    // Initialize logging both for native (tracing) and Android logcat
     init_logging();
+
+    // Helpful trace on entry
+    eprintln!("run_with_args called; args={:?}", args);
+    log::info!("run_with_args called");
 
     // Parse args with clap
     let matches = match Args::command().try_get_matches_from(args.clone()) {
@@ -89,12 +94,14 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         Ok(e) => e,
         Err(err) => {
             tracing::error!("SIP003 env error: {}", err);
+            eprintln!("SIP003 env error: {}", err);
             return 2;
         }
     };
 
     if sip003_env.is_present() {
         tracing::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
+        log::info!("SIP003 env detected; applying SS_* overrides");
     }
 
     let tcp_listen_host_provided = cli_provided(&matches, "tcp_listen_host");
@@ -110,7 +117,8 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     ) {
         Ok(hp) => hp,
         Err(err) => {
-            tracing::error!("SIP003 env error: {}", err);
+            tracing::error!("SIP003 select_host_port error: {}", err);
+            eprintln!("SIP003 select_host_port error: {}", err);
             return 2;
         }
     };
@@ -122,6 +130,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt,
             Err(err) => {
                 tracing::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         };
@@ -129,6 +138,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             domain
         } else {
             tracing::error!("A domain is required");
+            eprintln!("A domain is required");
             return 2;
         }
     };
@@ -139,6 +149,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(r) => r,
             Err(err) => {
                 tracing::error!("Resolver error: {}", err);
+                eprintln!("Resolver error: {}", err);
                 return 2;
             }
         }
@@ -147,6 +158,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(o) => o,
             Err(err) => {
                 tracing::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         };
@@ -161,6 +173,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                 Ok(r) => r,
                 Err(err) => {
                     tracing::error!("SIP003 env error: {}", err);
+                    eprintln!("SIP003 env error: {}", err);
                     return 2;
                 }
             };
@@ -176,12 +189,14 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                         Ok(r) => r,
                         Err(err) => {
                             tracing::error!("SIP003 env error: {}", err);
+                            eprintln!("SIP003 env error: {}", err);
                             return 2;
                         }
                     };
                 vec![ResolverSpec { resolver, mode }]
             } else {
                 tracing::error!("At least one resolver is required");
+                eprintln!("At least one resolver is required");
                 return 2;
             }
         }
@@ -194,6 +209,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt,
             Err(err) => {
                 tracing::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         }
@@ -208,6 +224,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         tracing::warn!(
             "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
         );
+        eprintln!("Server certificate pinning is disabled; consider providing --cert");
     }
 
     let keep_alive_interval = if cli_provided(&matches, "keep_alive_interval") {
@@ -217,6 +234,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt.unwrap_or(args.keep_alive_interval),
             Err(err) => {
                 tracing::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         }
@@ -235,18 +253,25 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         debug_streams: args.debug_streams,
     };
 
+    log::info!("Starting runtime with config: tcp_listen_host={}, tcp_listen_port={}, domain={}", tcp_listen_host, tcp_listen_port, domain);
+
     let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
         Ok(r) => r,
         Err(err) => {
             tracing::error!("Failed to build Tokio runtime: {}", err);
+            eprintln!("Failed to build Tokio runtime: {}", err);
             return 1;
         }
     };
 
     match runtime.block_on(run_client(&config)) {
-        Ok(code) => code,
+        Ok(code) => {
+            log::info!("run_client returned code {}", code);
+            code
+        },
         Err(err) => {
             tracing::error!("Client error: {}", err);
+            eprintln!("Client error: {}", err);
             1
         }
     }
@@ -259,7 +284,22 @@ fn sip003_check_opt<T>(opt: &Option<T>) -> Option<&T> {
 
 // ----------------- helpers -----------------
 
+/// Initialize logging. On Android this also sets up android_logger so logs appear in logcat.
 fn init_logging() {
+    // Android-specific logger that forwards `log` records to logcat
+    #[cfg(target_os = "android")]
+    {
+        // init_once is safe to call multiple times across threads
+        use android_logger::Config;
+        use log::LevelFilter;
+        android_logger::init_once(
+            Config::default()
+                .with_min_level(LevelFilter::Info)
+                .with_tag("slipstream"),
+        );
+    }
+
+    // tracing subscriber for console/CI builds or when running on host
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -428,17 +468,27 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// Returns 0 if background thread was spawned, non-zero for immediate error.
 #[no_mangle]
 pub extern "C" fn slipstream_start() -> i32 {
+    // Make sure Android logger is initialized when invoked from JNI
+    init_logging();
+    eprintln!("slipstream_start called");
+    log::info!("slipstream_start called");
+
     if STARTED.swap(true, Ordering::SeqCst) {
         // already started
+        log::info!("slipstream already started");
         return 0;
     }
 
     // capture current process args
     let args: Vec<String> = std::env::args().collect();
     thread::spawn(|| {
+        log::info!("slipstream background thread running; args={:?}", args);
         let code = run_with_args(args);
         if code != 0 {
             eprintln!("slipstream exited with code {}", code);
+            log::error!("slipstream exited with code {}", code);
+        } else {
+            log::info!("slipstream exited with code 0");
         }
     });
 
@@ -449,6 +499,7 @@ pub extern "C" fn slipstream_start() -> i32 {
 /// in your runtime for a graceful shutdown (not provided here).
 #[no_mangle]
 pub extern "C" fn slipstream_stop() {
+    log::info!("slipstream_stop called");
     STARTED.store(false, Ordering::SeqCst);
 }
 
@@ -460,7 +511,6 @@ pub extern "C" fn slipstream_main() -> i32 {
 }
 
 /// Some loaders look for `main`. Export a thin wrapper so loaders that expect `main` succeed.
-/// This is an exported symbol inside the library only; it doesn't conflict with your binary `main`.
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     slipstream_start()
