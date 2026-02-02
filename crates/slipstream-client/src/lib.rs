@@ -1,6 +1,7 @@
+// crates/slipstream-client/src/lib.rs
 //! Library entrypoint for slipstream-client.
-//! The original CLI main logic was refactored into `run_with_args` so we can build a cdylib.
-//! Exposes a minimal extern "C" wrapper (`slipstream_start`) for Android to call.
+//! The original CLI main logic is refactored into `run_with_args` so we can build a cdylib.
+//! Exposes minimal extern "C" wrappers (`slipstream_start` / `slipstream_stop`) for Android.
 
 mod dns;
 mod error;
@@ -64,27 +65,22 @@ pub struct Args {
     debug_streams: bool,
 }
 
-/// Run the main client logic but return an exit code instead of exiting the process.
-/// This function mirrors the previous `main` but returns `i32` for use by both CLI and cdylib.
-pub fn run_with_args<I, S>(args: I) -> i32
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
+/// Run the main client logic and return an exit code.
+/// Accepts concrete Vec<String> to satisfy clap trait bounds.
+pub fn run_with_args(args: Vec<String>) -> i32 {
     init_logging();
 
-    // Parse args with clap using the same types as before.
-    let matches = match Args::command().try_get_matches_from(args) {
+    // Parse args with clap
+    let matches = match Args::command().try_get_matches_from(args.clone()) {
         Ok(m) => m,
         Err(err) => {
-            // Clap will print errors by default when not using `exit` behavior.
+            // let clap print its message and exit as before
             err.exit();
         }
     };
     let args = match Args::from_arg_matches(&matches) {
         Ok(a) => a,
         Err(err) => {
-            // Clap's FromArgMatches::from_arg_matches returns an Err that calls exit:
             err.exit();
         }
     };
@@ -157,22 +153,26 @@ where
         if !resolver_options.resolvers.is_empty() {
             resolver_options.resolvers
         } else {
-            let sip003_remote =
-                match sip003::parse_endpoint(sip003_env.remote_host.as_deref(), sip003_env.remote_port.as_deref(), "SS_REMOTE") {
-                    Ok(r) => r,
-                    Err(err) => {
-                        tracing::error!("SIP003 env error: {}", err);
-                        return 2;
-                    }
-                };
-            if let Some(endpoint) = &sip303_check_opt(&sip003_remote) {
+            let sip003_remote = match sip003::parse_endpoint(
+                sip003_env.remote_host.as_deref(),
+                sip003_env.remote_port.as_deref(),
+                "SS_REMOTE",
+            ) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::error!("SIP003 env error: {}", err);
+                    return 2;
+                }
+            };
+            if let Some(endpoint) = &sip003_check_opt(&sip003_remote) {
                 let mode = if resolver_options.authoritative_remote {
                     ResolverMode::Authoritative
                 } else {
                     ResolverMode::Recursive
                 };
                 let resolver =
-                    match parse_host_port_parts(&endpoint.host, endpoint.port, AddressKind::Resolver) {
+                    match parse_host_port_parts(&endpoint.host, endpoint.port, AddressKind::Resolver)
+                    {
                         Ok(r) => r,
                         Err(err) => {
                             tracing::error!("SIP003 env error: {}", err);
@@ -252,13 +252,12 @@ where
     }
 }
 
-/// Minimal helper used above to "unwrap" an Option<&T> to Option<T> check for Sip003. This preserves previous logic.
-/// (In the original main you used sip003_remote variable directly; keep consistent.)
-fn sip303_check_opt<T>(opt: &Option<T>) -> Option<&T> {
+// Helper: unwrap Option<&T> to Option<&T> (preserve previous logic naming)
+fn sip003_check_opt<T>(opt: &Option<T>) -> Option<&T> {
     opt.as_ref()
 }
 
-// ----------------- helpers from original main -----------------
+// ----------------- helpers -----------------
 
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -359,7 +358,7 @@ struct ResolverOptions {
 }
 
 fn parse_resolvers_from_options(
-    options: &[sip003::Sip303Option],
+    options: &[sip003::Sip003Option],
 ) -> Result<ResolverOptions, String> {
     let mut ordered = Vec::new();
     let mut authoritative_remote = false;
@@ -390,7 +389,7 @@ fn parse_resolvers_from_options(
     })
 }
 
-fn parse_congestion_control(options: &[sip003::Sip303Option]) -> Result<Option<String>, String> {
+fn parse_congestion_control(options: &[sip003::Sip003Option]) -> Result<Option<String>, String> {
     let mut last = None;
     for option in options {
         if option.key == "congestion-control" {
@@ -404,7 +403,7 @@ fn parse_congestion_control(options: &[sip003::Sip303Option]) -> Result<Option<S
     Ok(last)
 }
 
-fn parse_keep_alive_interval(options: &[sip303::Sip303Option]) -> Result<Option<u16>, String> {
+fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<u16>, String> {
     let mut last = None;
     for option in options {
         if option.key == "keep-alive-interval" {
@@ -420,18 +419,13 @@ fn parse_keep_alive_interval(options: &[sip303::Sip303Option]) -> Result<Option<
 
 // ----------------- Minimal cdylib-friendly externs -----------------
 
-use std::ffi::CString;
-use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Start slipstream in a background thread using the current process args.
-///
 /// Returns 0 if background thread was spawned, non-zero for immediate error.
-/// This is a convenience wrapper; for Android you may want to expose more detailed
-/// FFI APIs that accept configuration parameters instead of process args.
 #[no_mangle]
 pub extern "C" fn slipstream_start() -> i32 {
     if STARTED.swap(true, Ordering::SeqCst) {

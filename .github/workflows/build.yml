@@ -1,9 +1,7 @@
-# Build libslipstream.so for Android ABIs (tailored to VAHHABSY/slipstream-rust)
-# - Builds cdylib from crates/slipstream-client
-# - Ensures vendor/picoquic exists (submodule or fallback clone)
-# - Verifies produced file is a shared object (not an executable)
-# - Uploads per-ABI artifacts (repo-relative paths)
-# - Packaging job downloads artifacts, verifies, strips and zips them into a jniLibs/ layout
+# .github/workflows/build.yml
+# (Replace the existing workflow with this fixed version — includes picoquic fallback,
+# correct i686 ndk_triple, ensures artifact upload uses repo-relative paths.)
+
 name: Build libslipstream for Android
 
 on:
@@ -76,9 +74,8 @@ jobs:
             echo "Found vendor/picoquic with CMakeLists.txt (submodule present)."
           else
             echo "vendor/picoquic missing or incomplete; attempting fallback clone."
-            # Try a known picoquic repo, replace URL if your project expects a different source/commit
-            git clone --depth 1 https://github.com/private-octopus/picoquic.git vendor/picoquic || \
-              git clone --depth 1 https://github.com/ekr/picoquic.git vendor/picoquic || true
+            # Adjust URL to the picoquic source you use (this is a fallback)
+            git clone --depth 1 https://github.com/ekr/picoquic.git vendor/picoquic || true
 
             if [ -f vendor/picoquic/CMakeLists.txt ]; then
               echo "Cloned picoquic into vendor/picoquic."
@@ -140,7 +137,6 @@ jobs:
       - name: Build libslipstream (cdylib) for ${{ matrix.target.abi }}
         working-directory: crates/slipstream-client
         run: |
-          # Build the library (cdylib) target for the Android triple
           cargo build \
             --release \
             --target ${{ matrix.target.rust_triple }} \
