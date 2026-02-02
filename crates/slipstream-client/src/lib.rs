@@ -24,14 +24,40 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::fs;
 use std::io::Write;
+use std::backtrace::Backtrace;
+use std::panic;
 
 /// FFI to Android log: __android_log_write(priority, tag, text)
 extern "C" {
     fn __android_log_write(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
 }
 
-/// Helper that always emits a log entry to Android logcat when running on Android,
-/// and falls back to eprintln! on host builds.
+/// Append a message to persistent log files (best-effort).
+/// Writes to app private files dir (requires debug/run-as) and /sdcard/Download for easy retrieval.
+fn append_to_log_file(msg: &str) {
+    // Best-effort: ignore errors
+    let _ = std::panic::catch_unwind(|| {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/data/net.typeblob.socks/files/slipstream.log")
+        {
+            let _ = f.write_all(msg.as_bytes());
+            let _ = f.write_all(b"\n");
+        }
+        if let Ok(mut f2) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/sdcard/Download/slipstream.log")
+        {
+            let _ = f2.write_all(msg.as_bytes());
+            let _ = f2.write_all(b"\n");
+        }
+    });
+}
+
+/// Low-level wrappers that always write to Android logcat (when on Android)
+/// and also persist messages to the log file via append_to_log_file.
 fn android_log_info(tag: &str, msg: &str) {
     if cfg!(target_os = "android") {
         let c_tag = CString::new(tag).unwrap_or_else(|_| CString::new("slipstream").unwrap());
@@ -41,8 +67,44 @@ fn android_log_info(tag: &str, msg: &str) {
             let _ = __android_log_write(4, c_tag.as_ptr(), c_msg.as_ptr());
         }
     } else {
-        eprintln!("[{}] {}", tag, msg);
+        eprintln!("[I/{}] {}", tag, msg);
     }
+    append_to_log_file(&format!("[I/{}] {}", tag, msg));
+}
+
+fn android_log_error(tag: &str, msg: &str) {
+    if cfg!(target_os = "android") {
+        let c_tag = CString::new(tag).unwrap_or_else(|_| CString::new("slipstream").unwrap());
+        let c_msg = CString::new(msg).unwrap_or_else(|_| CString::new("...").unwrap());
+        unsafe {
+            // 6 == ANDROID_LOG_ERROR
+            let _ = __android_log_write(6, c_tag.as_ptr(), c_msg.as_ptr());
+        }
+    } else {
+        eprintln!("[E/{}] {}", tag, msg);
+    }
+    append_to_log_file(&format!("[E/{}] {}", tag, msg));
+}
+
+fn android_log_debug(tag: &str, msg: &str) {
+    if cfg!(target_os = "android") {
+        let c_tag = CString::new(tag).unwrap_or_else(|_| CString::new("slipstream").unwrap());
+        let c_msg = CString::new(msg).unwrap_or_else(|_| CString::new("...").unwrap());
+        unsafe {
+            // 3 == ANDROID_LOG_DEBUG
+            let _ = __android_log_write(3, c_tag.as_ptr(), c_msg.as_ptr());
+        }
+    } else {
+        eprintln!("[D/{}] {}", tag, msg);
+    }
+    append_to_log_file(&format!("[D/{}] {}", tag, msg));
+}
+
+/// Helper used for consistent early returns with logging.
+fn bail_err(msg: &str) -> i32 {
+    android_log_error("slipstream", msg);
+    eprintln!("{}", msg);
+    2
 }
 
 #[derive(Parser, Debug)]
@@ -118,10 +180,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     let sip003_env = match sip003::read_sip003_env() {
         Ok(e) => e,
         Err(err) => {
-            log::error!("SIP003 env error: {}", err);
-            android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-            eprintln!("SIP003 env error: {}", err);
-            return 2;
+            return bail_err(&format!("SIP003 env error: {}", err));
         }
     };
 
@@ -143,10 +202,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     ) {
         Ok(hp) => hp,
         Err(err) => {
-            log::error!("SIP003 select_host_port error: {}", err);
-            android_log_info("slipstream", &format!("SIP003 select_host_port error: {}", err));
-            eprintln!("SIP003 select_host_port error: {}", err);
-            return 2;
+            return bail_err(&format!("SIP003 select_host_port error: {}", err));
         }
     };
 
@@ -156,19 +212,13 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         let option_domain = match parse_domain_option(&sip003_env.plugin_options) {
             Ok(opt) => opt,
             Err(err) => {
-                log::error!("SIP003 env error: {}", err);
-                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                eprintln!("SIP003 env error: {}", err);
-                return 2;
+                return bail_err(&format!("SIP003 env error: {}", err));
             }
         };
         if let Some(domain) = option_domain {
             domain
         } else {
-            log::error!("A domain is required");
-            android_log_info("slipstream", "A domain is required");
-            eprintln!("A domain is required");
-            return 2;
+            return bail_err("A domain is required");
         }
     };
 
@@ -177,20 +227,14 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         match build_resolvers(&matches, true) {
             Ok(r) => r,
             Err(err) => {
-                log::error!("Resolver error: {}", err);
-                android_log_info("slipstream", &format!("Resolver error: {}", err));
-                eprintln!("Resolver error: {}", err);
-                return 2;
+                return bail_err(&format!("Resolver error: {}", err));
             }
         }
     } else {
         let resolver_options = match parse_resolvers_from_options(&sip003_env.plugin_options) {
             Ok(o) => o,
             Err(err) => {
-                log::error!("SIP003 env error: {}", err);
-                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                eprintln!("SIP003 env error: {}", err);
-                return 2;
+                return bail_err(&format!("SIP003 env error: {}", err));
             }
         };
         if !resolver_options.resolvers.is_empty() {
@@ -203,10 +247,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             ) {
                 Ok(r) => r,
                 Err(err) => {
-                    log::error!("SIP003 env error: {}", err);
-                    android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                    eprintln!("SIP003 env error: {}", err);
-                    return 2;
+                    return bail_err(&format!("SIP003 env error: {}", err));
                 }
             };
             if let Some(endpoint) = &sip003_check_opt(&sip003_remote) {
@@ -220,18 +261,12 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                     {
                         Ok(r) => r,
                         Err(err) => {
-                            log::error!("SIP003 env error: {}", err);
-                            android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                            eprintln!("SIP003 env error: {}", err);
-                            return 2;
+                            return bail_err(&format!("SIP003 env error: {}", err));
                         }
                     };
                 vec![ResolverSpec { resolver, mode }]
             } else {
-                log::error!("At least one resolver is required");
-                android_log_info("slipstream", "At least one resolver is required");
-                eprintln!("At least one resolver is required");
-                return 2;
+                return bail_err("At least one resolver is required");
             }
         }
     };
@@ -242,10 +277,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         match parse_congestion_control(&sip003_env.plugin_options) {
             Ok(opt) => opt,
             Err(err) => {
-                log::error!("SIP003 env error: {}", err);
-                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                eprintln!("SIP003 env error: {}", err);
-                return 2;
+                return bail_err(&format!("SIP003 env error: {}", err));
             }
         }
     };
@@ -256,9 +288,6 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         sip003::last_option_value(&sip003_env.plugin_options, "cert")
     };
     if cert.is_none() {
-        log::warn!(
-            "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
-        );
         android_log_info("slipstream", "Server certificate pinning is disabled; consider providing --cert");
         eprintln!("Server certificate pinning is disabled; consider providing --cert");
     }
@@ -269,10 +298,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         match parse_keep_alive_interval(&sip003_env.plugin_options) {
             Ok(opt) => opt.unwrap_or(args.keep_alive_interval),
             Err(err) => {
-                log::error!("SIP003 env error: {}", err);
-                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
-                eprintln!("SIP003 env error: {}", err);
-                return 2;
+                return bail_err(&format!("SIP003 env error: {}", err));
             }
         }
     };
@@ -290,33 +316,32 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         debug_streams: args.debug_streams,
     };
 
+    android_log_info(
+        "slipstream",
+        &format!("Starting runtime: {}:{}", tcp_listen_host, tcp_listen_port),
+    );
     log::info!(
         "Starting runtime with config: tcp_listen_host={}, tcp_listen_port={}, domain={}",
         tcp_listen_host,
         tcp_listen_port,
         domain
     );
-    android_log_info("slipstream", &format!("Starting runtime: {}:{}", tcp_listen_host, tcp_listen_port));
 
     let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
         Ok(r) => r,
         Err(err) => {
-            log::error!("Failed to build Tokio runtime: {}", err);
-            android_log_info("slipstream", &format!("Failed to build Tokio runtime: {}", err));
-            eprintln!("Failed to build Tokio runtime: {}", err);
-            return 1;
+            return bail_err(&format!("Failed to build Tokio runtime: {}", err));
         }
     };
 
     match runtime.block_on(run_client(&config)) {
         Ok(code) => {
-            log::info!("run_client returned code {}", code);
             android_log_info("slipstream", &format!("run_client returned code {}", code));
+            log::info!("run_client returned code {}", code);
             code
         }
         Err(err) => {
-            log::error!("Client error: {}", err);
-            android_log_info("slipstream", &format!("Client error: {}", err));
+            android_log_error("slipstream", &format!("Client error: {}", err));
             eprintln!("Client error: {}", err);
             1
         }
@@ -331,6 +356,7 @@ fn sip003_check_opt<T>(opt: &Option<T>) -> Option<&T> {
 // ----------------- helpers -----------------
 
 /// Initialize logging. On Android this also sets up android_logger so logs appear in logcat.
+/// Also installs a panic hook to capture panics & backtraces in logcat and persistent file.
 fn init_logging() {
     // Android-specific logger that forwards `log` records to logcat
     #[cfg(target_os = "android")]
@@ -352,6 +378,24 @@ fn init_logging() {
         .with_target(false)
         .without_time()
         .try_init();
+
+    // install panic hook so panics are visible in logcat + file
+    panic::set_hook(Box::new(|info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| *s)
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("panic with non-string payload");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let bt = Backtrace::capture();
+        let msg = format!("PANIC: {} at {}\nBacktrace:\n{:?}", payload, location, bt);
+        android_log_error("slipstream-panic", &msg);
+        append_to_log_file(&msg);
+    }));
 }
 
 fn parse_domain(input: &str) -> Result<String, String> {
