@@ -1,7 +1,7 @@
 // crates/slipstream-client/src/lib.rs
-//! library entrypoint for slipstream-client.
-//! the original cli main logic is refactored into `run_with_args` so we can build a cdylib.
-//! exposes minimal extern "c" wrappers (`slipstream_start` / `slipstream_stop`) for android.
+//! Library entrypoint for slipstream-client.
+//! The original CLI main logic is refactored into `run_with_args` so we can build a cdylib.
+//! Exposes minimal extern "C" wrappers (`slipstream_start` / `slipstream_stop`) for Android.
 
 mod dns;
 mod error;
@@ -10,41 +10,41 @@ mod pinning;
 mod runtime;
 mod streams;
 
-use clap::{parser::valuesource, arggroup, commandfactory, fromargmatches, parser};
+use clap::{parser::ValueSource, ArgGroup, CommandFactory, FromArgMatches, Parser};
 use slipstream_core::{
-    normalize_domain, parse_host_port, parse_host_port_parts, sip003, addresskind, hostport,
+    normalize_domain, parse_host_port, parse_host_port_parts, sip003, AddressKind, HostPort,
 };
-use slipstream_ffi::{clientconfig, resolvermode, resolverspec};
-use tokio::runtime::builder;
-use tracing_subscriber::envfilter;
+use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec};
+use tokio::runtime::Builder;
+use tracing_subscriber::EnvFilter;
 
 use runtime::run_client;
 
-#[derive(parser, debug)]
+#[derive(Parser, Debug)]
 #[command(
     name = "slipstream-client",
-    about = "slipstream-client - a high-performance covert channel over dns (client)",
+    about = "slipstream-client - A high-performance covert channel over DNS (client)",
     group(
-        arggroup::new("resolvers")
+        ArgGroup::new("resolvers")
             .multiple(true)
             .args(["resolver", "authoritative"])
     )
 )]
-pub struct args {
+pub struct Args {
     #[arg(long = "tcp-listen-host", default_value = "::")]
-    tcp_listen_host: string,
+    tcp_listen_host: String,
     #[arg(long = "tcp-listen-port", short = 'l', default_value_t = 5201)]
     tcp_listen_port: u16,
     #[arg(long = "resolver", short = 'r', value_parser = parse_resolver)]
-    resolver: vec<hostport>,
+    resolver: Vec<HostPort>,
     #[arg(
         long = "congestion-control",
         short = 'c',
         value_parser = ["bbr", "dcubic"]
     )]
-    congestion_control: option<string>,
+    congestion_control: Option<String>,
     #[arg(long = "authoritative", value_parser = parse_resolver)]
-    authoritative: vec<hostport>,
+    authoritative: Vec<HostPort>,
     #[arg(
         short = 'g',
         long = "gso",
@@ -54,9 +54,9 @@ pub struct args {
     )]
     gso: bool,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
-    domain: option<string>,
-    #[arg(long = "cert", value_name = "path")]
-    cert: option<string>,
+    domain: Option<String>,
+    #[arg(long = "cert", value_name = "PATH")]
+    cert: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
     #[arg(long = "debug-poll")]
@@ -65,36 +65,40 @@ pub struct args {
     debug_streams: bool,
 }
 
-/// run the main client logic and return an exit code.
-/// accepts concrete vec<string> to satisfy clap trait bounds.
-pub fn run_with_args(args: vec<string>) -> i32 {
+/// Run the main client logic and return an exit code.
+/// Accepts concrete Vec<String> to satisfy clap trait bounds.
+pub fn run_with_args(args: Vec<String>) -> i32 {
+    // Initialize logging (Android logger + tracing subscriber)
     init_logging();
 
-    // parse args with clap
-    let matches = match args::command().try_get_matches_from(args.clone()) {
-        ok(m) => m,
-        err(err) => {
+    log::info!("run_with_args called; args={:?}", args);
+
+    // Parse args with clap
+    let matches = match Args::command().try_get_matches_from(args.clone()) {
+        Ok(m) => m,
+        Err(err) => {
             // let clap print its message and exit as before
             err.exit();
         }
     };
-    let args = match args::from_arg_matches(&matches) {
-        ok(a) => a,
-        err(err) => {
+    let args = match Args::from_arg_matches(&matches) {
+        Ok(a) => a,
+        Err(err) => {
             err.exit();
         }
     };
 
     let sip003_env = match sip003::read_sip003_env() {
-        ok(e) => e,
-        err(err) => {
-            tracing::error!("sip003 env error: {}", err);
+        Ok(e) => e,
+        Err(err) => {
+            log::error!("SIP003 env error: {}", err);
+            eprintln!("SIP003 env error: {}", err);
             return 2;
         }
     };
 
     if sip003_env.is_present() {
-        tracing::info!("sip003 env detected; applying ss_* overrides with cli precedence");
+        log::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
     }
 
     let tcp_listen_host_provided = cli_provided(&matches, "tcp_listen_host");
@@ -106,29 +110,32 @@ pub fn run_with_args(args: vec<string>) -> i32 {
         tcp_listen_port_provided,
         sip003_env.local_host.as_deref(),
         sip003_env.local_port.as_deref(),
-        "ss_local",
+        "SS_LOCAL",
     ) {
-        ok(hp) => hp,
-        err(err) => {
-            tracing::error!("sip003 env error: {}", err);
+        Ok(hp) => hp,
+        Err(err) => {
+            log::error!("SIP003 select_host_port error: {}", err);
+            eprintln!("SIP003 select_host_port error: {}", err);
             return 2;
         }
     };
 
-    let domain = if let some(domain) = args.domain.clone() {
+    let domain = if let Some(domain) = args.domain.clone() {
         domain
     } else {
         let option_domain = match parse_domain_option(&sip003_env.plugin_options) {
-            ok(opt) => opt,
-            err(err) => {
-                tracing::error!("sip003 env error: {}", err);
+            Ok(opt) => opt,
+            Err(err) => {
+                log::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         };
-        if let some(domain) = option_domain {
+        if let Some(domain) = option_domain {
             domain
         } else {
-            tracing::error!("a domain is required");
+            log::error!("A domain is required");
+            eprintln!("A domain is required");
             return 2;
         }
     };
@@ -136,17 +143,19 @@ pub fn run_with_args(args: vec<string>) -> i32 {
     let cli_has_resolvers = has_cli_resolvers(&matches);
     let resolvers = if cli_has_resolvers {
         match build_resolvers(&matches, true) {
-            ok(r) => r,
-            err(err) => {
-                tracing::error!("resolver error: {}", err);
+            Ok(r) => r,
+            Err(err) => {
+                log::error!("Resolver error: {}", err);
+                eprintln!("Resolver error: {}", err);
                 return 2;
             }
         }
     } else {
         let resolver_options = match parse_resolvers_from_options(&sip003_env.plugin_options) {
-            ok(o) => o,
-            err(err) => {
-                tracing::error!("sip003 env error: {}", err);
+            Ok(o) => o,
+            Err(err) => {
+                log::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         };
@@ -156,32 +165,35 @@ pub fn run_with_args(args: vec<string>) -> i32 {
             let sip003_remote = match sip003::parse_endpoint(
                 sip003_env.remote_host.as_deref(),
                 sip003_env.remote_port.as_deref(),
-                "ss_remote",
+                "SS_REMOTE",
             ) {
-                ok(r) => r,
-                err(err) => {
-                    tracing::error!("sip003 env error: {}", err);
+                Ok(r) => r,
+                Err(err) => {
+                    log::error!("SIP003 env error: {}", err);
+                    eprintln!("SIP003 env error: {}", err);
                     return 2;
                 }
             };
-            if let some(endpoint) = &sip003_check_opt(&sip003_remote) {
+            if let Some(endpoint) = &sip303_check_opt(&sip003_remote) {
                 let mode = if resolver_options.authoritative_remote {
-                    resolvermode::authoritative
+                    ResolverMode::Authoritative
                 } else {
-                    resolvermode::recursive
+                    ResolverMode::Recursive
                 };
                 let resolver =
-                    match parse_host_port_parts(&endpoint.host, endpoint.port, addresskind::resolver)
+                    match parse_host_port_parts(&endpoint.host, endpoint.port, AddressKind::Resolver)
                     {
-                        ok(r) => r,
-                        err(err) => {
-                            tracing::error!("sip003 env error: {}", err);
+                        Ok(r) => r,
+                        Err(err) => {
+                            log::error!("SIP003 env error: {}", err);
+                            eprintln!("SIP003 env error: {}", err);
                             return 2;
                         }
                     };
-                vec![resolverspec { resolver, mode }]
+                vec![ResolverSpec { resolver, mode }]
             } else {
-                tracing::error!("at least one resolver is required");
+                log::error!("At least one resolver is required");
+                eprintln!("At least one resolver is required");
                 return 2;
             }
         }
@@ -191,9 +203,10 @@ pub fn run_with_args(args: vec<string>) -> i32 {
         args.congestion_control.clone()
     } else {
         match parse_congestion_control(&sip003_env.plugin_options) {
-            ok(opt) => opt,
-            err(err) => {
-                tracing::error!("sip003 env error: {}", err);
+            Ok(opt) => opt,
+            Err(err) => {
+                log::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         }
@@ -205,24 +218,26 @@ pub fn run_with_args(args: vec<string>) -> i32 {
         sip003::last_option_value(&sip003_env.plugin_options, "cert")
     };
     if cert.is_none() {
-        tracing::warn!(
-            "server certificate pinning is disabled; this allows mitm. provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
+        log::warn!(
+            "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
         );
+        eprintln!("Server certificate pinning is disabled; consider providing --cert");
     }
 
     let keep_alive_interval = if cli_provided(&matches, "keep_alive_interval") {
         args.keep_alive_interval
     } else {
         match parse_keep_alive_interval(&sip003_env.plugin_options) {
-            ok(opt) => opt.unwrap_or(args.keep_alive_interval),
-            err(err) => {
-                tracing::error!("sip003 env error: {}", err);
+            Ok(opt) => opt.unwrap_or(args.keep_alive_interval),
+            Err(err) => {
+                log::error!("SIP003 env error: {}", err);
+                eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
         }
     };
 
-    let config = clientconfig {
+    let config = ClientConfig {
         tcp_listen_host: &tcp_listen_host,
         tcp_listen_port,
         resolvers: &resolvers,
@@ -235,32 +250,58 @@ pub fn run_with_args(args: vec<string>) -> i32 {
         debug_streams: args.debug_streams,
     };
 
-    let runtime = match builder::new_current_thread().enable_io().enable_time().build() {
-        ok(r) => r,
-        err(err) => {
-            tracing::error!("failed to build tokio runtime: {}", err);
+    log::info!(
+        "Starting runtime with config: tcp_listen_host={}, tcp_listen_port={}, domain={}",
+        tcp_listen_host,
+        tcp_listen_port,
+        domain
+    );
+
+    let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
+        Ok(r) => r,
+        Err(err) => {
+            log::error!("Failed to build Tokio runtime: {}", err);
+            eprintln!("Failed to build Tokio runtime: {}", err);
             return 1;
         }
     };
 
     match runtime.block_on(run_client(&config)) {
-        ok(code) => code,
-        err(err) => {
-            tracing::error!("client error: {}", err);
+        Ok(code) => {
+            log::info!("run_client returned code {}", code);
+            code
+        }
+        Err(err) => {
+            log::error!("Client error: {}", err);
+            eprintln!("Client error: {}", err);
             1
         }
     }
 }
 
-// helper: unwrap option<&t> to option<&t> (preserve previous logic naming)
-fn sip003_check_opt<t>(opt: &option<t>) -> option<&t> {
+// Helper: unwrap Option<&T> to Option<&T> (preserve previous logic naming)
+fn sip303_check_opt<T>(opt: &Option<T>) -> Option<&T> {
     opt.as_ref()
 }
 
 // ----------------- helpers -----------------
 
+/// Initialize logging. On Android this also sets up android_logger so logs appear in logcat.
 fn init_logging() {
-    let filter = envfilter::try_from_default_env().unwrap_or_else(|_| envfilter::new("info"));
+    // Android-specific logger that forwards `log` records to logcat
+    #[cfg(target_os = "android")]
+    {
+        use android_logger::Config;
+        use log::LevelFilter;
+        android_logger::init_once(
+            Config::default()
+                .with_min_level(LevelFilter::Info)
+                .with_tag("slipstream"),
+        );
+    }
+
+    // tracing subscriber for console/CI builds or when running on host
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -268,200 +309,210 @@ fn init_logging() {
         .try_init();
 }
 
-fn parse_domain(input: &str) -> result<string, string> {
+fn parse_domain(input: &str) -> Result<String, String> {
     normalize_domain(input).map_err(|err| err.to_string())
 }
 
-fn parse_resolver(input: &str) -> result<hostport, string> {
-    parse_host_port(input, 53, addresskind::resolver).map_err(|err| err.to_string())
+fn parse_resolver(input: &str) -> Result<HostPort, String> {
+    parse_host_port(input, 53, AddressKind::Resolver).map_err(|err| err.to_string())
 }
 
-fn build_resolvers(matches: &clap::argmatches, require: bool) -> result<vec<resolverspec>, string> {
-    let mut ordered = vec::new();
-    collect_resolvers(matches, "resolver", resolvermode::recursive, &mut ordered)?;
+fn build_resolvers(matches: &clap::ArgMatches, require: bool) -> Result<Vec<ResolverSpec>, String> {
+    let mut ordered = Vec::new();
+    collect_resolvers(matches, "resolver", ResolverMode::Recursive, &mut ordered)?;
     collect_resolvers(
         matches,
         "authoritative",
-        resolvermode::authoritative,
+        ResolverMode::Authoritative,
         &mut ordered,
     )?;
     if ordered.is_empty() && require {
-        return err("at least one resolver is required".to_string());
+        return Err("At least one resolver is required".to_string());
     }
     ordered.sort_by_key(|(idx, _)| *idx);
-    ok(ordered.into_iter().map(|(_, spec)| spec).collect())
+    Ok(ordered.into_iter().map(|(_, spec)| spec).collect())
 }
 
 fn collect_resolvers(
-    matches: &clap::argmatches,
+    matches: &clap::ArgMatches,
     name: &str,
-    mode: resolvermode,
-    ordered: &mut vec<(usize, resolverspec)>,
-) -> result<(), string> {
-    let indices: vec<usize> = matches.indices_of(name).into_iter().flatten().collect();
-    let values: vec<hostport> = matches
-        .get_many::<hostport>(name)
+    mode: ResolverMode,
+    ordered: &mut Vec<(usize, ResolverSpec)>,
+) -> Result<(), String> {
+    let indices: Vec<usize> = matches.indices_of(name).into_iter().flatten().collect();
+    let values: Vec<HostPort> = matches
+        .get_many::<HostPort>(name)
         .into_iter()
         .flatten()
         .cloned()
         .collect();
     if indices.len() != values.len() {
-        return err(format!("mismatched {} arguments", name));
+        return Err(format!("Mismatched {} arguments", name));
     }
     for (idx, resolver) in indices.into_iter().zip(values) {
-        ordered.push((idx, resolverspec { resolver, mode }));
+        ordered.push((idx, ResolverSpec { resolver, mode }));
     }
-    ok(())
+    Ok(())
 }
 
-fn cli_provided(matches: &clap::argmatches, id: &str) -> bool {
-    matches.value_source(id) == some(valuesource::commandline)
+fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::CommandLine)
 }
 
-fn has_cli_resolvers(matches: &clap::argmatches) -> bool {
+fn has_cli_resolvers(matches: &clap::ArgMatches) -> bool {
     matches
-        .get_many::<hostport>("resolver")
+        .get_many::<HostPort>("resolver")
         .map(|values| values.len() > 0)
         .unwrap_or(false)
         || matches
-            .get_many::<hostport>("authoritative")
+            .get_many::<HostPort>("authoritative")
             .map(|values| values.len() > 0)
             .unwrap_or(false)
 }
 
-fn parse_domain_option(options: &[sip003::sip003option]) -> result<option<string>, string> {
-    let mut domain = none;
+fn parse_domain_option(options: &[sip003::Sip003Option]) -> Result<Option<String>, String> {
+    let mut domain = None;
     let mut saw_domain = false;
     for option in options {
         if option.key == "domain" {
             if saw_domain {
-                return err("sip003 domain option must not be repeated".to_string());
+                return Err("SIP003 domain option must not be repeated".to_string());
             }
             saw_domain = true;
             let mut entries = sip003::split_list(&option.value).map_err(|err| err.to_string())?;
             if entries.len() > 1 {
-                return err("sip003 domain option must contain a single value".to_string());
+                return Err("SIP003 domain option must contain a single value".to_string());
             }
             let entry = entries
                 .pop()
-                .ok_or_else(|| "sip003 domain option must contain a single value".to_string())?;
+                .ok_or_else(|| "SIP003 domain option must contain a single value".to_string())?;
             let normalized = normalize_domain(&entry).map_err(|err| err.to_string())?;
-            domain = some(normalized);
+            domain = Some(normalized);
         }
     }
-    ok(domain)
+    Ok(domain)
 }
 
-struct resolveroptions {
-    resolvers: vec<resolverspec>,
+struct ResolverOptions {
+    resolvers: Vec<ResolverSpec>,
     authoritative_remote: bool,
 }
 
 fn parse_resolvers_from_options(
-    options: &[sip003::sip003option],
-) -> result<resolveroptions, string> {
-    let mut ordered = vec::new();
+    options: &[sip003::Sip303Option],
+) -> Result<ResolverOptions, String> {
+    let mut ordered = Vec::new();
     let mut authoritative_remote = false;
     for option in options {
         let mode = match option.key.as_str() {
-            "resolver" => resolvermode::recursive,
-            "authoritative" => resolvermode::authoritative,
+            "resolver" => ResolverMode::Recursive,
+            "authoritative" => ResolverMode::Authoritative,
             _ => continue,
         };
         let trimmed = option.value.trim();
         if trimmed.is_empty() {
-            if mode == resolvermode::authoritative {
+            if mode == ResolverMode::Authoritative {
                 authoritative_remote = true;
                 continue;
             }
-            return err("empty resolver value is not allowed".to_string());
+            return Err("Empty resolver value is not allowed".to_string());
         }
         let entries = sip003::split_list(&option.value).map_err(|err| err.to_string())?;
         for entry in entries {
-            let resolver = parse_host_port(&entry, 53, addresskind::resolver)
+            let resolver = parse_host_port(&entry, 53, AddressKind::Resolver)
                 .map_err(|err| err.to_string())?;
-            ordered.push(resolverspec { resolver, mode });
+            ordered.push(ResolverSpec { resolver, mode });
         }
     }
-    ok(resolveroptions {
+    Ok(ResolverOptions {
         resolvers: ordered,
         authoritative_remote,
     })
 }
 
-fn parse_congestion_control(options: &[sip003::sip003option]) -> result<option<string>, string> {
-    let mut last = none;
+fn parse_congestion_control(options: &[sip003::Sip003Option]) -> Result<Option<String>, String> {
+    let mut last = None;
     for option in options {
         if option.key == "congestion-control" {
             let value = option.value.trim();
             if value != "bbr" && value != "dcubic" {
-                return err(format!("invalid congestion-control value: {}", value));
+                return Err(format!("Invalid congestion-control value: {}", value));
             }
-            last = some(value.to_string());
+            last = Some(value.to_string());
         }
     }
-    ok(last)
+    Ok(last)
 }
 
-fn parse_keep_alive_interval(options: &[sip003::sip003option]) -> result<option<u16>, string> {
-    let mut last = none;
+fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<u16>, String> {
+    let mut last = None;
     for option in options {
         if option.key == "keep-alive-interval" {
             let value = option.value.trim();
             let parsed = value
                 .parse::<u16>()
-                .map_err(|_| format!("invalid keep-alive-interval value: {}", value))?;
-            last = some(parsed);
+                .map_err(|_| format!("Invalid keep-alive-interval value: {}", value))?;
+            last = Some(parsed);
         }
     }
-    ok(last)
+    Ok(last)
 }
 
-// ----------------- minimal cdylib-friendly externs -----------------
+// ----------------- Minimal cdylib-friendly externs -----------------
 
-use std::sync::atomic::{atomicbool, ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-static started: atomicbool = atomicbool::new(false);
+static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// start slipstream in a background thread using the current process args.
-/// returns 0 if background thread was spawned, non-zero for immediate error.
+/// Start slipstream in a background thread using the current process args.
+/// Returns 0 if background thread was spawned, non-zero for immediate error.
 #[no_mangle]
-pub extern "c" fn slipstream_start() -> i32 {
-    if started.swap(true, ordering::seqcst) {
+pub extern "C" fn slipstream_start() -> i32 {
+    // Make sure Android logger is initialized when invoked from JNI
+    init_logging();
+    eprintln!("slipstream_start called");
+    log::info!("slipstream_start called");
+
+    if STARTED.swap(true, Ordering::SeqCst) {
         // already started
+        log::info!("slipstream already started");
         return 0;
     }
 
     // capture current process args
-    let args: vec<string> = std::env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     thread::spawn(|| {
+        log::info!("slipstream background thread running; args={:?}", args);
         let code = run_with_args(args);
         if code != 0 {
             eprintln!("slipstream exited with code {}", code);
+            log::error!("slipstream exited with code {}", code);
+        } else {
+            log::info!("slipstream exited with code 0");
         }
     });
 
     0
 }
 
-/// stop slipstream (best-effort); you must implement an actual stop/shutdown mechanism
+/// Stop slipstream (best-effort); you must implement an actual stop/shutdown mechanism
 /// in your runtime for a graceful shutdown (not provided here).
 #[no_mangle]
-pub extern "c" fn slipstream_stop() {
-    started.store(false, ordering::seqcst);
+pub extern "C" fn slipstream_stop() {
+    log::info!("slipstream_stop called");
+    STARTED.store(false, Ordering::SeqCst);
 }
 
-/// compatibility wrapper: export slipstream_main symbol expected by the android loader.
-/// non-blocking: delegates to `slipstream_start()` which spawns the runtime thread.
+/// Compatibility wrapper: export slipstream_main symbol expected by the Android loader.
+/// Non-blocking: delegates to `slipstream_start()` which spawns the runtime thread.
 #[no_mangle]
-pub extern "c" fn slipstream_main() -> i32 {
+pub extern "C" fn slipstream_main() -> i32 {
     slipstream_start()
 }
 
-/// some loaders look for `main`. export a thin wrapper so loaders that expect `main` succeed.
-/// this is an exported symbol inside the library only; it doesn't conflict with your binary `main`.
+/// Some loaders look for `main`. Export a thin wrapper so loaders that expect `main` succeed.
 #[no_mangle]
-pub extern "c" fn main() -> i32 {
+pub extern "C" fn main() -> i32 {
     slipstream_start()
 }
