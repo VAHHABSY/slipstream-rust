@@ -202,7 +202,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     let cert = if args.cert.is_some() {
         args.cert.clone()
     } else {
-        sip003::last_option_value(&sip003_env.plugin_options, "cert")
+        sip003::last_option_value(&sip303_env.plugin_options, "cert")
     };
     if cert.is_none() {
         tracing::warn!(
@@ -450,4 +450,18 @@ pub extern "C" fn slipstream_start() -> i32 {
 #[no_mangle]
 pub extern "C" fn slipstream_stop() {
     STARTED.store(false, Ordering::SeqCst);
+}
+
+/// Compatibility wrapper: export slipstream_main symbol expected by the Android loader.
+/// Non-blocking: delegates to `slipstream_start()` which spawns the runtime thread.
+#[no_mangle]
+pub extern "C" fn slipstream_main() -> i32 {
+    slipstream_start()
+}
+
+/// Some loaders look for `main`. Export a thin wrapper so loaders that expect `main` succeed.
+/// This is an exported symbol inside the library only; it doesn't conflict with your binary `main`.
+#[no_mangle]
+pub extern "C" fn main() -> i32 {
+    slipstream_start()
 }
