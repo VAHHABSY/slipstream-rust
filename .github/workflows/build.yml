@@ -1,8 +1,5 @@
-# .github/workflows/build.yml
-# (Replace the existing workflow with this fixed version — includes picoquic fallback,
-# correct i686 ndk_triple, ensures artifact upload uses repo-relative paths.)
-
-name: Build libslipstream for Android
+# Build libslipstream.so for Android ABIs with extra diagnostics
+name: Build libslipstream for Android (debug)
 
 on:
   workflow_dispatch:
@@ -61,6 +58,20 @@ jobs:
         with:
           targets: ${{ matrix.target.rust_triple }}
 
+      - name: Print tool versions and targets
+        run: |
+          echo "=== rustc / cargo versions ==="
+          rustc --version --verbose || true
+          cargo --version --verbose || true
+          echo "=== rustup targets installed ==="
+          rustup target list --installed || true
+          echo "=== NDK toolchain check ==="
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          CC_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang"
+          echo "Expected clang: $CC_PATH"
+          ls -la "$(dirname "$CC_PATH")" || true
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -68,32 +79,13 @@ jobs:
 
       - name: Prepare picoquic vendor (submodule or clone fallback)
         run: |
-          echo "::group::Vendor/picoquic check"
           ls -la vendor || true
           if [ -f vendor/picoquic/CMakeLists.txt ]; then
-            echo "Found vendor/picoquic with CMakeLists.txt (submodule present)."
+            echo "Found vendor/picoquic"
           else
-            echo "vendor/picoquic missing or incomplete; attempting fallback clone."
-            # Adjust URL to the picoquic source you use (this is a fallback)
+            echo "Attempting to clone picoquic fallback into vendor/picoquic"
             git clone --depth 1 https://github.com/ekr/picoquic.git vendor/picoquic || true
-
-            if [ -f vendor/picoquic/CMakeLists.txt ]; then
-              echo "Cloned picoquic into vendor/picoquic."
-            else
-              echo "ERROR: vendor/picoquic/CMakeLists.txt still missing."
-              ls -la vendor || true
-              exit 1
-            fi
-          fi
-          echo "::endgroup::"
-
-      - name: Optionally run picoquic build helper (if present)
-        run: |
-          if [ -x ./vendor/picoquic/scripts/build_picoquic.sh ]; then
-            echo "Running vendor/picoquic/scripts/build_picoquic.sh"
-            (cd vendor/picoquic && ./scripts/build_picoquic.sh) || echo "picoquic script failed (continue to let cargo's build script handle it)"
-          else
-            echo "No vendor picoquic build script found or not executable; proceeding."
+            ls -la vendor/picoquic || true
           fi
 
       - name: Cache Cargo and target
@@ -122,45 +114,66 @@ jobs:
           echo "ANDROID_PLATFORM=android-${{ matrix.target.api }}" >> $GITHUB_ENV
           echo "ANDROID_ABI=${{ matrix.target.abi }}" >> $GITHUB_ENV
           echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
-          # OpenSSL paths - adjust if your build requires different values
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
           echo "OPENSSL_ROOT_DIR=/usr" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_CRYPTO_LIBRARY=/usr/lib/x86_64-linux-gnu/libcrypto.so" >> $GITHUB_ENV
           echo "OPENSSL_SSL_LIBRARY=/usr/lib/x86_64-linux-gnu/libssl.so" >> $GITHUB_ENV
-          echo "::group::NDK toolcheck"
-          echo "Expected clang: $CC_PATH"
-          ls -la "$(dirname "$CC_PATH")" || true
-          test -x "$CC_PATH" || (echo "clang not found: $CC_PATH" && ls -la "$(dirname "$CC_PATH")" && false)
-          echo "::endgroup::"
 
-      - name: Build libslipstream (cdylib) for ${{ matrix.target.abi }}
+      - name: Verbose build libslipstream (cdylib) for ${{ matrix.target.abi }}
         working-directory: crates/slipstream-client
         run: |
-          cargo build \
-            --release \
-            --target ${{ matrix.target.rust_triple }} \
-            --lib \
-            --features openssl-vendored,picoquic-minimal-build
+          set -x
+          echo "Running cargo build (verbose) for target ${{ matrix.target.rust_triple }}"
+          # verbose build so linker / compile errors are printed
+          cargo build -v --release --target ${{ matrix.target.rust_triple }} --lib --features openssl-vendored,picoquic-minimal-build
 
-      - name: Ensure built lib exists
+      - name: List crate target tree
         run: |
-          LIB="crates/slipstream-client/target/${{ matrix.target.rust_triple }}/release/libslipstream.so"
-          echo "Checking $LIB"
-          if [ ! -f "$LIB" ]; then
-            echo "ERROR: expected library not found: $LIB"
-            ls -la "crates/slipstream-client/target/${{ matrix.target.rust_triple }}/release" || true
+          echo "Repository root target entries:"
+          ls -la target || true
+          echo "crate-relative target entries:"
+          ls -la crates/slipstream-client/target || true
+          echo "Recursive listing under crate target (3 levels):"
+          find crates/slipstream-client/target -maxdepth 4 -type d -print -exec ls -la {} \; || true
+          echo "Search for libslipstream files:"
+          find crates/slipstream-client/target -type f -name "libslipstream.*" -print -exec file {} \; || true
+
+      - name: Ensure built lib exists (searching multiple locations)
+        run: |
+          TRIPLE=${{ matrix.target.rust_triple }}
+          CAND1="crates/slipstream-client/target/${TRIPLE}/release/libslipstream.so"
+          CAND2="crates/slipstream-client/target/${TRIPLE}/release/deps/libslipstream.so"
+          CAND3="crates/slipstream-client/target/release/libslipstream.so"
+          echo "Checking candidates:"
+          echo "$CAND1"
+          echo "$CAND2"
+          echo "$CAND3"
+          if [ -f "$CAND1" ]; then
+            LIB="$CAND1"
+          elif [ -f "$CAND2" ]; then
+            LIB="$CAND2"
+          elif [ -f "$CAND3" ]; then
+            LIB="$CAND3"
+          else
+            echo "ERROR: no libslipstream.so found. Dumping relevant directories for debugging:"
+            ls -la crates/slipstream-client/target/${TRIPLE}/release || true
+            ls -la crates/slipstream-client/target/release || true
+            find crates/slipstream-client/target -type f -maxdepth 4 -print -exec file {} \; || true
             exit 1
           fi
+          echo "Found library: $LIB"
           ls -lh "$LIB"
           file "$LIB"
           file "$LIB" | grep -E "shared object|shared library" || (file "$LIB" && exit 1)
+          echo "Setting output var LIB_PATH=$LIB"
+          echo "LIB_PATH=$LIB" >> $GITHUB_ENV
 
-      - name: Upload lib artifact
+      - name: Upload lib artifact (repo-relative path)
         uses: actions/upload-artifact@v4
         with:
           name: slipstream-${{ matrix.target.abi }}
-          path: crates/slipstream-client/target/${{ matrix.target.rust_triple }}/release/libslipstream.so
+          path: ${{ env.LIB_PATH }}
           retention-days: 7
 
   package:
