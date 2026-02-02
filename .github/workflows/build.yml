@@ -39,7 +39,7 @@ jobs:
             abi: x86_64
             api: 33
           - rust_triple: i686-linux-android
-            ndk_triple: i686-linux-androideabi
+            ndk_triple: i686-linux-android
             abi: x86
             api: 33
 
