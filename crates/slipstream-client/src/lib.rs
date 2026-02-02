@@ -22,6 +22,8 @@ use runtime::run_client;
 
 use std::ffi::CString;
 use std::os::raw::c_char;
+use std::fs;
+use std::io::Write;
 
 /// FFI to Android log: __android_log_write(priority, tag, text)
 extern "C" {
@@ -514,6 +516,19 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 pub extern "C" fn slipstream_start() -> i32 {
     // Make sure Android logger is initialized when invoked from JNI
     init_logging();
+
+    // Write marker files (best-effort) so we can confirm native path executed even if logcat is quiet
+    let _ = std::panic::catch_unwind(|| {
+        let _ = fs::create_dir_all("/data/data/net.typeblob.socks/files");
+        if let Ok(mut f) = fs::File::create("/data/data/net.typeblob.socks/files/slipstream_marker.txt") {
+            let _ = f.write_all(b"native-run\n");
+        }
+        // Also write to public storage (Downloads) for easy access without run-as
+        if let Ok(mut f2) = fs::File::create("/sdcard/Download/slipstream_marker.txt") {
+            let _ = f2.write_all(b"native-run\n");
+        }
+    });
+
     android_log_info("slipstream", "slipstream_start invoked (native)");
     log::info!("slipstream_start called");
 
