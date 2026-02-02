@@ -20,6 +20,29 @@ use tracing_subscriber::EnvFilter;
 
 use runtime::run_client;
 
+use std::ffi::CString;
+use std::os::raw::c_char;
+
+/// FFI to Android log: __android_log_write(priority, tag, text)
+extern "C" {
+    fn __android_log_write(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
+}
+
+/// Helper that always emits a log entry to Android logcat when running on Android,
+/// and falls back to eprintln! on host builds.
+fn android_log_info(tag: &str, msg: &str) {
+    if cfg!(target_os = "android") {
+        let c_tag = CString::new(tag).unwrap_or_else(|_| CString::new("slipstream").unwrap());
+        let c_msg = CString::new(msg).unwrap_or_else(|_| CString::new("...").unwrap());
+        unsafe {
+            // 4 == ANDROID_LOG_INFO
+            let _ = __android_log_write(4, c_tag.as_ptr(), c_msg.as_ptr());
+        }
+    } else {
+        eprintln!("[{}] {}", tag, msg);
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "slipstream-client",
@@ -71,6 +94,8 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     // Initialize logging (Android logger + tracing subscriber)
     init_logging();
 
+    // Emit a guaranteed Android log entry and a normal log
+    android_log_info("slipstream", &format!("run_with_args called; args={:?}", args));
     log::info!("run_with_args called; args={:?}", args);
 
     // Parse args with clap
@@ -92,6 +117,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         Ok(e) => e,
         Err(err) => {
             log::error!("SIP003 env error: {}", err);
+            android_log_info("slipstream", &format!("SIP003 env error: {}", err));
             eprintln!("SIP003 env error: {}", err);
             return 2;
         }
@@ -99,6 +125,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
 
     if sip003_env.is_present() {
         log::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
+        android_log_info("slipstream", "SIP003 env detected; applying SS_* overrides");
     }
 
     let tcp_listen_host_provided = cli_provided(&matches, "tcp_listen_host");
@@ -115,6 +142,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         Ok(hp) => hp,
         Err(err) => {
             log::error!("SIP003 select_host_port error: {}", err);
+            android_log_info("slipstream", &format!("SIP003 select_host_port error: {}", err));
             eprintln!("SIP003 select_host_port error: {}", err);
             return 2;
         }
@@ -127,6 +155,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt,
             Err(err) => {
                 log::error!("SIP003 env error: {}", err);
+                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                 eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
@@ -135,6 +164,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             domain
         } else {
             log::error!("A domain is required");
+            android_log_info("slipstream", "A domain is required");
             eprintln!("A domain is required");
             return 2;
         }
@@ -146,6 +176,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(r) => r,
             Err(err) => {
                 log::error!("Resolver error: {}", err);
+                android_log_info("slipstream", &format!("Resolver error: {}", err));
                 eprintln!("Resolver error: {}", err);
                 return 2;
             }
@@ -155,6 +186,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(o) => o,
             Err(err) => {
                 log::error!("SIP003 env error: {}", err);
+                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                 eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
@@ -170,6 +202,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                 Ok(r) => r,
                 Err(err) => {
                     log::error!("SIP003 env error: {}", err);
+                    android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                     eprintln!("SIP003 env error: {}", err);
                     return 2;
                 }
@@ -186,6 +219,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                         Ok(r) => r,
                         Err(err) => {
                             log::error!("SIP003 env error: {}", err);
+                            android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                             eprintln!("SIP003 env error: {}", err);
                             return 2;
                         }
@@ -193,6 +227,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
                 vec![ResolverSpec { resolver, mode }]
             } else {
                 log::error!("At least one resolver is required");
+                android_log_info("slipstream", "At least one resolver is required");
                 eprintln!("At least one resolver is required");
                 return 2;
             }
@@ -206,6 +241,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt,
             Err(err) => {
                 log::error!("SIP003 env error: {}", err);
+                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                 eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
@@ -221,6 +257,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         log::warn!(
             "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
         );
+        android_log_info("slipstream", "Server certificate pinning is disabled; consider providing --cert");
         eprintln!("Server certificate pinning is disabled; consider providing --cert");
     }
 
@@ -231,6 +268,7 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
             Ok(opt) => opt.unwrap_or(args.keep_alive_interval),
             Err(err) => {
                 log::error!("SIP003 env error: {}", err);
+                android_log_info("slipstream", &format!("SIP003 env error: {}", err));
                 eprintln!("SIP003 env error: {}", err);
                 return 2;
             }
@@ -256,11 +294,13 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
         tcp_listen_port,
         domain
     );
+    android_log_info("slipstream", &format!("Starting runtime: {}:{}", tcp_listen_host, tcp_listen_port));
 
     let runtime = match Builder::new_current_thread().enable_io().enable_time().build() {
         Ok(r) => r,
         Err(err) => {
             log::error!("Failed to build Tokio runtime: {}", err);
+            android_log_info("slipstream", &format!("Failed to build Tokio runtime: {}", err));
             eprintln!("Failed to build Tokio runtime: {}", err);
             return 1;
         }
@@ -269,10 +309,12 @@ pub fn run_with_args(args: Vec<String>) -> i32 {
     match runtime.block_on(run_client(&config)) {
         Ok(code) => {
             log::info!("run_client returned code {}", code);
+            android_log_info("slipstream", &format!("run_client returned code {}", code));
             code
         }
         Err(err) => {
             log::error!("Client error: {}", err);
+            android_log_info("slipstream", &format!("Client error: {}", err));
             eprintln!("Client error: {}", err);
             1
         }
@@ -293,7 +335,7 @@ fn init_logging() {
     {
         use android_logger::Config;
         use log::LevelFilter;
-        // android_logger uses `with_max_level` to set the maximum level observed
+        // android_logger uses `with_max_level` in this version
         android_logger::init_once(
             Config::default()
                 .with_max_level(LevelFilter::Info)
@@ -472,20 +514,23 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 pub extern "C" fn slipstream_start() -> i32 {
     // Make sure Android logger is initialized when invoked from JNI
     init_logging();
-    eprintln!("slipstream_start called");
+    android_log_info("slipstream", "slipstream_start invoked (native)");
     log::info!("slipstream_start called");
 
     if STARTED.swap(true, Ordering::SeqCst) {
         // already started
         log::info!("slipstream already started");
+        android_log_info("slipstream", "slipstream already started");
         return 0;
     }
 
     // capture current process args
     let args: Vec<String> = std::env::args().collect();
     thread::spawn(|| {
+        android_log_info("slipstream", "slipstream background thread starting run_with_args");
         log::info!("slipstream background thread running; args={:?}", args);
         let code = run_with_args(args);
+        android_log_info("slipstream", &format!("slipstream background thread finished with code {}", code));
         if code != 0 {
             eprintln!("slipstream exited with code {}", code);
             log::error!("slipstream exited with code {}", code);
@@ -502,6 +547,7 @@ pub extern "C" fn slipstream_start() -> i32 {
 #[no_mangle]
 pub extern "C" fn slipstream_stop() {
     log::info!("slipstream_stop called");
+    android_log_info("slipstream", "slipstream_stop invoked");
     STARTED.store(false, Ordering::SeqCst);
 }
 
