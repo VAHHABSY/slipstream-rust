@@ -1,5 +1,8 @@
-# Build libslipstream.so for Android ABIs with extra diagnostics
-name: Build libslipstream for Android (debug)
+# Build libslipstream.so for Android ABIs (tailored to VAHHABSY/slipstream-rust)
+# - Writes targets into crates/slipstream-client/target via CARGO_TARGET_DIR
+# - Ensures vendor/picoquic exists (submodule or fallback clone)
+# - Verbose cargo output and predictable artifact paths
+name: Build libslipstream for Android
 
 on:
   workflow_dispatch:
@@ -60,17 +63,10 @@ jobs:
 
       - name: Print tool versions and targets
         run: |
-          echo "=== rustc / cargo versions ==="
           rustc --version --verbose || true
           cargo --version --verbose || true
-          echo "=== rustup targets installed ==="
           rustup target list --installed || true
-          echo "=== NDK toolchain check ==="
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-          CC_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang"
-          echo "Expected clang: $CC_PATH"
-          ls -la "$(dirname "$CC_PATH")" || true
 
       - name: Install build dependencies
         run: |
@@ -88,7 +84,14 @@ jobs:
             ls -la vendor/picoquic || true
           fi
 
-      - name: Cache Cargo and target
+      - name: Set crate-local Cargo target dir
+        run: |
+          # Make cargo write outputs into a crate-local folder to simplify locating artifacts
+          echo "CARGO_TARGET_DIR=${{ github.workspace }}/crates/slipstream-client/target" >> $GITHUB_ENV
+          # Show what we set
+          echo "CARGO_TARGET_DIR=${{ github.workspace }}/crates/slipstream-client/target"
+
+      - name: Cache Cargo and crate-local target
         uses: actions/cache@v4
         with:
           path: |
@@ -99,7 +102,6 @@ jobs:
 
       - name: Setup toolchain env for ${{ matrix.target.abi }}
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
           NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           CC_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang"
           CXX_PATH="${NDK_TOOLCHAIN}/bin/${{ matrix.target.ndk_triple }}${{ matrix.target.api }}-clang++"
@@ -119,33 +121,31 @@ jobs:
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_CRYPTO_LIBRARY=/usr/lib/x86_64-linux-gnu/libcrypto.so" >> $GITHUB_ENV
           echo "OPENSSL_SSL_LIBRARY=/usr/lib/x86_64-linux-gnu/libssl.so" >> $GITHUB_ENV
+          echo "Expected clang: $CC_PATH"
+          ls -la "$(dirname "$CC_PATH")" || true
 
       - name: Verbose build libslipstream (cdylib) for ${{ matrix.target.abi }}
         working-directory: crates/slipstream-client
         run: |
           set -x
-          echo "Running cargo build (verbose) for target ${{ matrix.target.rust_triple }}"
-          # verbose build so linker / compile errors are printed
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
           cargo build -v --release --target ${{ matrix.target.rust_triple }} --lib --features openssl-vendored,picoquic-minimal-build
 
-      - name: List crate target tree
+      - name: List crate-local target tree
         run: |
-          echo "Repository root target entries:"
-          ls -la target || true
-          echo "crate-relative target entries:"
+          echo "Listing crate-local target root:"
           ls -la crates/slipstream-client/target || true
-          echo "Recursive listing under crate target (3 levels):"
-          find crates/slipstream-client/target -maxdepth 4 -type d -print -exec ls -la {} \; || true
-          echo "Search for libslipstream files:"
+          echo "Listing crate-local target for triple:"
+          ls -la crates/slipstream-client/target/${{ matrix.target.rust_triple }} || true
           find crates/slipstream-client/target -type f -name "libslipstream.*" -print -exec file {} \; || true
 
-      - name: Ensure built lib exists (searching multiple locations)
+      - name: Ensure built lib exists (crate-local path)
         run: |
           TRIPLE=${{ matrix.target.rust_triple }}
           CAND1="crates/slipstream-client/target/${TRIPLE}/release/libslipstream.so"
           CAND2="crates/slipstream-client/target/${TRIPLE}/release/deps/libslipstream.so"
           CAND3="crates/slipstream-client/target/release/libslipstream.so"
-          echo "Checking candidates:"
+          echo "Candidates:"
           echo "$CAND1"
           echo "$CAND2"
           echo "$CAND3"
@@ -156,17 +156,15 @@ jobs:
           elif [ -f "$CAND3" ]; then
             LIB="$CAND3"
           else
-            echo "ERROR: no libslipstream.so found. Dumping relevant directories for debugging:"
-            ls -la crates/slipstream-client/target/${TRIPLE}/release || true
-            ls -la crates/slipstream-client/target/release || true
-            find crates/slipstream-client/target -type f -maxdepth 4 -print -exec file {} \; || true
+            echo "ERROR: no libslipstream.so found. Dumping crate-local target tree for debugging:"
+            ls -la crates/slipstream-client/target || true
+            find crates/slipstream-client/target -type f -maxdepth 5 -print -exec file {} \; || true
             exit 1
           fi
           echo "Found library: $LIB"
           ls -lh "$LIB"
           file "$LIB"
           file "$LIB" | grep -E "shared object|shared library" || (file "$LIB" && exit 1)
-          echo "Setting output var LIB_PATH=$LIB"
           echo "LIB_PATH=$LIB" >> $GITHUB_ENV
 
       - name: Upload lib artifact (repo-relative path)
@@ -194,7 +192,6 @@ jobs:
 
       - name: Verify downloaded libs
         run: |
-          echo "Listing libs:"
           find libs -type f -maxdepth 3 -print -exec file {} \;
           for abi in arm64-v8a armeabi-v7a x86_64 x86; do
             FILE="libs/slipstream-${abi}/libslipstream.so"
